@@ -118,18 +118,15 @@ export default function App() {
   const [customAvatar, setCustomAvatar] = useState('');
   const [isEditingProfile, setIsEditingProfile] = useState(false);
 
-  const [coins, setCoins] = useState(1250);
-  const [xp, setXp] = useState(8450);
-  const [level, setLevel] = useState(24);
-  const [streak, setStreak] = useState(7);
-  const [completedQuestsCount, setCompletedQuestsCount] = useState(142);
-  const [completedToday, setCompletedToday] = useState([
-    { id: 101, title: "Read 20 Pages", tier: "Silver", type: "Daily Habit", xp: 150 },
-    { id: 102, title: "No Sugary Snacks", tier: "Bronze", type: "Daily Habit", xp: 50 }
-  ]);
+  const [coins, setCoins] = useState(0);
+  const [xp, setXp] = useState(0);
+  const [level, setLevel] = useState(1);
+  const [streak, setStreak] = useState(0);
+  const [completedQuestsCount, setCompletedQuestsCount] = useState(0);
+  const [completedToday, setCompletedToday] = useState([]);
 
   // Quests State
-  const [quests, setQuests] = useState(initialQuests);
+  const [quests, setQuests] = useState([]);
   const [questFilter, setQuestFilter] = useState('All'); // 'All', 'Gold', 'Silver', 'Bronze'
   const [isQuestModalOpen, setIsQuestModalOpen] = useState(false);
   
@@ -139,7 +136,7 @@ export default function App() {
   const [newQuestTier, setNewQuestTier] = useState('Bronze');
 
   // Shop State
-  const [shopItems, setShopItems] = useState(initialShopItems);
+  const [shopItems, setShopItems] = useState([]);
   const [shopFilter, setShopFilter] = useState('ALL'); // 'ALL', 'DIGITAL', 'REAL WORLD', 'BOOSTERS', 'SKIN'
   const [isShopModalOpen, setIsShopModalOpen] = useState(false);
   const [editingShopItem, setEditingShopItem] = useState(null); // Item object or null for creating
@@ -172,6 +169,33 @@ export default function App() {
     }
   }, [isDarkMode]);
 
+  // Initial Data Fetch
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const userRes = await fetch('/api/user');
+        const userData = await userRes.json();
+        setCoins(userData.coins);
+        setXp(userData.xp);
+        setLevel(userData.level);
+        setStreak(userData.streak);
+        setCompletedQuestsCount(userData.completedQuestsCount);
+        setCompletedToday(userData.completedToday);
+
+        const questsRes = await fetch('/api/quests');
+        const questsData = await questsRes.json();
+        setQuests(questsData);
+
+        const shopRes = await fetch('/api/shop');
+        const shopData = await shopRes.json();
+        setShopItems(shopData);
+      } catch (err) {
+        console.error("Error fetching data:", err);
+      }
+    };
+    fetchData();
+  }, []);
+
   // Toast helper
   const triggerToast = (message, type = 'success') => {
     const id = Date.now();
@@ -191,76 +215,79 @@ export default function App() {
   }, [xp]);
 
   // Complete/Claim Quest Action
-  const claimQuest = (quest) => {
-    setXp((prev) => prev + quest.xpReward);
-    setCoins((prev) => prev + quest.coinReward);
-    
-    // Add to completed list
-    const newCompleted = {
-      id: Date.now(),
-      title: quest.title,
-      tier: quest.tier,
-      type: "One-time Quest",
-      xp: quest.xpReward
-    };
-    setCompletedToday((prev) => [newCompleted, ...prev]);
-
-    // Remove from active quests
-    setQuests((prev) => prev.filter(q => q.id !== quest.id));
-    triggerToast(`Quest Claimed! +${quest.xpReward} XP, +${quest.coinReward} Coins 🌟`);
+  const claimQuest = async (quest) => {
+    try {
+      const res = await fetch(`/api/quests/${quest.id}/claim`, { method: 'PUT' });
+      const data = await res.json();
+      if (data.success) {
+        setXp(data.userStats.xp);
+        setCoins(data.userStats.coins);
+        setLevel(data.userStats.level);
+        setCompletedToday(data.userStats.completedToday);
+        setQuests((prev) => prev.filter(q => q.id !== quest.id));
+        triggerToast(`Quest Claimed! +${quest.xpReward} XP, +${quest.coinReward} Coins 🌟`);
+      }
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   // Set quest status to claimable
-  const completeQuestAction = (questId) => {
-    setQuests((prev) => prev.map(q => {
-      if (q.id === questId) {
-        return { ...q, status: 'claimable', progress: 100 };
-      }
-      return q;
-    }));
-    triggerToast("Quest Objectives Completed! Claim your reward. 🎉");
+  const completeQuestAction = async (questId) => {
+    try {
+        const res = await fetch(`/api/quests/${questId}/complete`, { method: 'PUT' });
+        const data = await res.json();
+        setQuests((prev) => prev.map(q => q.id === questId ? data : q));
+        triggerToast("Quest Objectives Completed! Claim your reward. 🎉");
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   // Delete Quest
-  const deleteQuest = (questId) => {
-    setQuests((prev) => prev.filter(q => q.id !== questId));
-    triggerToast("Quest deleted", "error");
+  const deleteQuest = async (questId) => {
+    try {
+        await fetch(`/api/quests/${questId}`, { method: 'DELETE' });
+        setQuests((prev) => prev.filter(q => q.id !== questId));
+        triggerToast("Quest deleted", "error");
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   // Handle Hydration Quest increase
-  const increaseHydration = () => {
-    setQuests((prev) => prev.map(q => {
-      if (q.id === 3) {
-        const nextProgress = Math.min(100, q.progress + 20);
-        const nextStatus = nextProgress === 100 ? 'claimable' : 'active';
-        if (nextProgress === 100 && q.progress < 100) {
-          triggerToast("Hydration Quest complete! Ready to claim. 💧");
+  const increaseHydration = async () => {
+    try {
+        const res = await fetch(`/api/quests/3/hydrate`, { method: 'PUT' });
+        const data = await res.json();
+        setQuests((prev) => prev.map(q => q.id === 3 ? data : q));
+        if (data.status === 'claimable') {
+            triggerToast("Hydration Quest complete! Ready to claim. 💧");
         }
-        return { ...q, progress: nextProgress, status: nextStatus };
-      }
-      return q;
-    }));
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   // Purchase Shop Item Action
-  const purchaseItem = (item) => {
-    if (coins < item.cost) {
-      triggerToast("Insufficient Coins!", "error");
-      return;
-    }
-    
-    setCoins((prev) => prev - item.cost);
-    setShopItems((prev) => prev.map(s => {
-      if (s.id === item.id) {
-        return { ...s, ownedCount: s.ownedCount + 1 };
+  const purchaseItem = async (item) => {
+    try {
+      const res = await fetch(`/api/shop/${item.id}/purchase`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setCoins(data.userStats.coins);
+        setShopItems((prev) => prev.map(s => s.id === item.id ? data.purchasedItem : s));
+        if (item.category === "Skin") {
+          triggerToast(`Unlocked Skin: ${item.title}! Select it in Profile. 👕`);
+        } else {
+          triggerToast(`Successfully purchased ${item.title}! 🛒`);
+        }
+      } else {
+        triggerToast(data.error || "Purchase failed!", "error");
       }
-      return s;
-    }));
-
-    if (item.category === "Skin") {
-      triggerToast(`Unlocked Skin: ${item.title}! Select it in Profile. 👕`);
-    } else {
-      triggerToast(`Successfully purchased ${item.title}! 🛒`);
+    } catch (err) {
+      console.error(err);
+      triggerToast("Purchase failed!", "error");
     }
   };
 
@@ -300,55 +327,66 @@ export default function App() {
   };
 
   // Save reward (Create or Update)
-  const handleSaveShopItem = (e) => {
+  const handleSaveShopItem = async (e) => {
     e.preventDefault();
     if (!shopItemTitle.trim()) return;
 
     const imgToUse = shopItemImage || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&q=80&w=400";
 
-    if (editingShopItem) {
-      // Editing Mode
-      setShopItems((prev) => prev.map(s => {
-        if (s.id === editingShopItem.id) {
-          return {
-            ...s,
-            title: shopItemTitle,
-            description: shopItemDescription,
-            cost: Number(shopItemCost),
-            category: shopItemCategory,
-            image: imgToUse
-          };
+    try {
+        if (editingShopItem) {
+          // Editing Mode
+          const res = await fetch(`/api/shop/${editingShopItem.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: shopItemTitle,
+                description: shopItemDescription,
+                cost: Number(shopItemCost),
+                category: shopItemCategory,
+                image: imgToUse
+            })
+          });
+          const data = await res.json();
+          setShopItems((prev) => prev.map(s => s.id === editingShopItem.id ? data : s));
+          triggerToast("Reward updated successfully! ✏️");
+        } else {
+          // Creation Mode
+          const res = await fetch(`/api/shop`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: shopItemTitle,
+                description: shopItemDescription || "No custom reward description provided.",
+                cost: Number(shopItemCost),
+                category: shopItemCategory,
+                image: imgToUse,
+                icon: "redeem"
+            })
+          });
+          const data = await res.json();
+          setShopItems((prev) => [data, ...prev]);
+          triggerToast("Created new custom reward: " + data.title + "! 🎁");
         }
-        return s;
-      }));
-      triggerToast("Reward updated successfully! ✏️");
-    } else {
-      // Creation Mode
-      const newItem = {
-        id: Date.now(),
-        title: shopItemTitle,
-        description: shopItemDescription || "No custom reward description provided.",
-        cost: Number(shopItemCost),
-        category: shopItemCategory,
-        image: imgToUse,
-        icon: "redeem",
-        ownedCount: 0
-      };
-      setShopItems((prev) => [newItem, ...prev]);
-      triggerToast("Created new custom reward: " + newItem.title + "! 🎁");
+        setIsShopModalOpen(false);
+    } catch (err) {
+        console.error(err);
     }
-
-    setIsShopModalOpen(false);
   };
 
   // Delete Shop Item
-  const deleteShopItem = (itemId) => {
-    setShopItems((prev) => prev.filter(s => s.id !== itemId));
-    triggerToast("Reward deleted from shop", "error");
+  const deleteShopItem = async (itemId) => {
+    try {
+        await fetch(`/api/shop/${itemId}`, { method: 'DELETE' });
+        setShopItems((prev) => prev.filter(s => s.id !== itemId));
+        triggerToast("Reward deleted from shop", "error");
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   // Add new quest
-  const handleCreateQuest = (e) => {
+  const handleCreateQuest = async (e) => {
     e.preventDefault();
     if (!newQuestTitle.trim()) return;
 
@@ -362,23 +400,30 @@ export default function App() {
       coinReward = 50;
     }
 
-    const newQuest = {
-      id: Date.now(),
-      title: newQuestTitle,
-      description: newQuestDescription || "No description provided.",
-      tier: newQuestTier,
-      xpReward,
-      coinReward,
-      status: 'active',
-      progress: 0
-    };
-
-    setQuests((prev) => [newQuest, ...prev]);
-    setIsQuestModalOpen(false);
-    setNewQuestTitle('');
-    setNewQuestDescription('');
-    setNewQuestTier('Bronze');
-    triggerToast("Created new quest: " + newQuest.title + "! 📝");
+    try {
+        const res = await fetch(`/api/quests`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: newQuestTitle,
+                description: newQuestDescription || "No description provided.",
+                tier: newQuestTier,
+                xpReward,
+                coinReward,
+                status: 'active',
+                progress: 0
+            })
+        });
+        const data = await res.json();
+        setQuests((prev) => [data, ...prev]);
+        setIsQuestModalOpen(false);
+        setNewQuestTitle('');
+        setNewQuestDescription('');
+        setNewQuestTier('Bronze');
+        triggerToast("Created new quest: " + data.title + "! 📝");
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   // Quest filters
@@ -394,11 +439,18 @@ export default function App() {
   });
 
   // Daily Streak Bonus trigger
-  const claimStreakBonus = () => {
-    setStreak(prev => prev + 1);
-    setCoins(prev => prev + 150);
-    setXp(prev => prev + 300);
-    triggerToast("Daily Streak Maintained! Bonus +150 Coins & +300 XP awarded! 🔥");
+  const claimStreakBonus = async () => {
+    try {
+        const res = await fetch(`/api/user/streak`, { method: 'POST' });
+        const data = await res.json();
+        setStreak(data.streak);
+        setCoins(data.coins);
+        setXp(data.xp);
+        setLevel(data.level);
+        triggerToast("Daily Streak Maintained! Bonus +150 Coins & +300 XP awarded! 🔥");
+    } catch (err) {
+        console.error(err);
+    }
   };
 
   return (
@@ -781,16 +833,9 @@ export default function App() {
                       <button 
                         onClick={() => openEditShopItem(item)}
                         className="bg-white/90 text-black p-1 hover:bg-black hover:text-white transition-colors border border-black/20"
-                        title="Edit Item"
+                        title="Customize Item"
                       >
                         <span className="material-symbols-outlined text-xs">edit</span>
-                      </button>
-                      <button 
-                        onClick={() => deleteShopItem(item.id)}
-                        className="bg-white/90 text-red-600 p-1 hover:bg-red-600 hover:text-white transition-colors border border-black/20"
-                        title="Delete Item"
-                      >
-                        <span className="material-symbols-outlined text-xs">delete</span>
                       </button>
                     </div>
 
@@ -1370,13 +1415,25 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="pt-2">
+              <div className="pt-2 flex flex-col gap-2">
                 <button 
                   type="submit"
                   className="w-full bg-primary text-on-primary font-label-bold text-xs py-3 border border-primary hover:bg-transparent hover:text-primary transition-all uppercase tracking-widest font-bold"
                 >
                   {editingShopItem ? 'Save Updates' : 'Forge Item'}
                 </button>
+                {editingShopItem && (
+                  <button 
+                    type="button"
+                    onClick={() => {
+                        deleteShopItem(editingShopItem.id);
+                        setIsShopModalOpen(false);
+                    }}
+                    className="w-full bg-surface-container-lowest text-red-600 font-label-bold text-xs py-2 border border-red-600 hover:bg-red-600 hover:text-white transition-all uppercase tracking-widest font-bold"
+                  >
+                    Delete Item
+                  </button>
+                )}
               </div>
             </form>
           </div>
