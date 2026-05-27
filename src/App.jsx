@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { supabase } from './supabaseClient';
 
 // Sample initial data in classic styling
 const initialQuests = [
@@ -173,22 +174,38 @@ export default function App() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const userRes = await fetch('/api/user');
-        const userData = await userRes.json();
-        setCoins(userData.coins);
-        setXp(userData.xp);
-        setLevel(userData.level);
-        setStreak(userData.streak);
-        setCompletedQuestsCount(userData.completedQuestsCount);
-        setCompletedToday(userData.completedToday);
+        const { data: userData, error: userErr } = await supabase.from('user_stats').select('*').single();
+        if (userData && !userErr) {
+          setCoins(userData.coins);
+          setXp(userData.xp);
+          setLevel(userData.level);
+          setStreak(userData.streak);
+        }
 
-        const questsRes = await fetch('/api/quests');
-        const questsData = await questsRes.json();
-        setQuests(questsData);
+        const { data: completedData } = await supabase.from('completed_quests').select('*').order('completed_at', { ascending: false });
+        if (completedData) {
+            setCompletedToday(completedData);
+            setCompletedQuestsCount(completedData.length);
+        }
 
-        const shopRes = await fetch('/api/shop');
-        const shopData = await shopRes.json();
-        setShopItems(shopData);
+        const { data: questsData, error: questsErr } = await supabase.from('quests').select('*').order('id', { ascending: false });
+        if (questsData && !questsErr) {
+          setQuests(questsData.map(q => ({
+            id: q.id,
+            title: q.title,
+            description: q.description,
+            tier: q.tier,
+            xpReward: q.xp_reward,
+            coinReward: q.coin_reward,
+            status: q.status,
+            progress: q.progress
+          })));
+        }
+
+        const { data: shopData, error: shopErr } = await supabase.from('shop_items').select('*').order('id', { ascending: false });
+        if (shopData && !shopErr) {
+          setShopItems(shopData);
+        }
       } catch (err) {
         console.error("Error fetching data:", err);
       }
@@ -217,16 +234,35 @@ export default function App() {
   // Complete/Claim Quest Action
   const claimQuest = async (quest) => {
     try {
-      const res = await fetch(`/api/quests/${quest.id}/claim`, { method: 'PUT' });
-      const data = await res.json();
-      if (data.success) {
-        setXp(data.userStats.xp);
-        setCoins(data.userStats.coins);
-        setLevel(data.userStats.level);
-        setCompletedToday(data.userStats.completedToday);
-        setQuests((prev) => prev.filter(q => q.id !== quest.id));
-        triggerToast(`Quest Claimed! +${quest.xpReward} XP, +${quest.coinReward} Coins 🌟`);
+      const { data: userStats } = await supabase.from('user_stats').select('*').single();
+      if (!userStats) return;
+
+      let newXp = userStats.xp + quest.xpReward;
+      let newCoins = userStats.coins + quest.coinReward;
+      let newLevel = userStats.level;
+      if (newXp >= 10000) {
+        newLevel += 1;
+        newXp -= 10000;
       }
+
+      await supabase.from('user_stats').update({ xp: newXp, coins: newCoins, level: newLevel }).eq('id', userStats.id);
+      
+      const newCompleted = {
+        title: quest.title,
+        tier: quest.tier,
+        type: "One-time Quest",
+        xp: quest.xpReward
+      };
+      const { data: completedRes } = await supabase.from('completed_quests').insert(newCompleted).select().single();
+      
+      await supabase.from('quests').delete().eq('id', quest.id);
+
+      setXp(newXp);
+      setCoins(newCoins);
+      setLevel(newLevel);
+      if (completedRes) setCompletedToday(prev => [completedRes, ...prev]);
+      setQuests((prev) => prev.filter(q => q.id !== quest.id));
+      triggerToast(`Quest Claimed! +${quest.xpReward} XP, +${quest.coinReward} Coins 🌟`);
     } catch (err) {
         console.error(err);
     }
@@ -235,10 +271,11 @@ export default function App() {
   // Set quest status to claimable
   const completeQuestAction = async (questId) => {
     try {
-        const res = await fetch(`/api/quests/${questId}/complete`, { method: 'PUT' });
-        const data = await res.json();
-        setQuests((prev) => prev.map(q => q.id === questId ? data : q));
-        triggerToast("Quest Objectives Completed! Claim your reward. 🎉");
+        const { data, error } = await supabase.from('quests').update({ status: 'claimable', progress: 100 }).eq('id', questId).select().single();
+        if (data && !error) {
+          setQuests((prev) => prev.map(q => q.id === questId ? { ...q, status: data.status, progress: data.progress } : q));
+          triggerToast("Quest Objectives Completed! Claim your reward. 🎉");
+        }
     } catch (err) {
         console.error(err);
     }
@@ -247,7 +284,7 @@ export default function App() {
   // Delete Quest
   const deleteQuest = async (questId) => {
     try {
-        await fetch(`/api/quests/${questId}`, { method: 'DELETE' });
+        await supabase.from('quests').delete().eq('id', questId);
         setQuests((prev) => prev.filter(q => q.id !== questId));
         triggerToast("Quest deleted", "error");
     } catch (err) {
@@ -258,11 +295,17 @@ export default function App() {
   // Handle Hydration Quest increase
   const increaseHydration = async () => {
     try {
-        const res = await fetch(`/api/quests/3/hydrate`, { method: 'PUT' });
-        const data = await res.json();
-        setQuests((prev) => prev.map(q => q.id === 3 ? data : q));
-        if (data.status === 'claimable') {
-            triggerToast("Hydration Quest complete! Ready to claim. 💧");
+        const quest = quests.find(q => q.id === 3);
+        if (!quest) return;
+        const nextProgress = Math.min(100, quest.progress + 20);
+        const nextStatus = nextProgress === 100 ? 'claimable' : 'active';
+        
+        const { data, error } = await supabase.from('quests').update({ progress: nextProgress, status: nextStatus }).eq('id', 3).select().single();
+        if (data && !error) {
+          setQuests((prev) => prev.map(q => q.id === 3 ? { ...q, status: data.status, progress: data.progress } : q));
+          if (data.status === 'claimable') {
+              triggerToast("Hydration Quest complete! Ready to claim. 💧");
+          }
         }
     } catch (err) {
         console.error(err);
@@ -272,18 +315,26 @@ export default function App() {
   // Purchase Shop Item Action
   const purchaseItem = async (item) => {
     try {
-      const res = await fetch(`/api/shop/${item.id}/purchase`, { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        setCoins(data.userStats.coins);
-        setShopItems((prev) => prev.map(s => s.id === item.id ? data.purchasedItem : s));
+      const { data: userStats } = await supabase.from('user_stats').select('*').single();
+      if (!userStats || userStats.coins < item.cost) {
+        triggerToast("Insufficient coins!", "error");
+        return;
+      }
+
+      const newCoins = userStats.coins - item.cost;
+      await supabase.from('user_stats').update({ coins: newCoins }).eq('id', userStats.id);
+      
+      const newOwnedCount = item.ownedCount + 1;
+      const { data: purchasedItem, error } = await supabase.from('shop_items').update({ owned_count: newOwnedCount }).eq('id', item.id).select().single();
+      
+      if (purchasedItem && !error) {
+        setCoins(newCoins);
+        setShopItems((prev) => prev.map(s => s.id === item.id ? { ...purchasedItem, ownedCount: purchasedItem.owned_count } : s));
         if (item.category === "Skin") {
           triggerToast(`Unlocked Skin: ${item.title}! Select it in Profile. 👕`);
         } else {
           triggerToast(`Successfully purchased ${item.title}! 🛒`);
         }
-      } else {
-        triggerToast(data.error || "Purchase failed!", "error");
       }
     } catch (err) {
       console.error(err);
@@ -336,37 +387,34 @@ export default function App() {
     try {
         if (editingShopItem) {
           // Editing Mode
-          const res = await fetch(`/api/shop/${editingShopItem.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                title: shopItemTitle,
-                description: shopItemDescription,
-                cost: Number(shopItemCost),
-                category: shopItemCategory,
-                image: imgToUse
-            })
-          });
-          const data = await res.json();
-          setShopItems((prev) => prev.map(s => s.id === editingShopItem.id ? data : s));
-          triggerToast("Reward updated successfully! ✏️");
+          const { data, error } = await supabase.from('shop_items').update({
+            title: shopItemTitle,
+            description: shopItemDescription,
+            cost: Number(shopItemCost),
+            category: shopItemCategory,
+            image: imgToUse
+          }).eq('id', editingShopItem.id).select().single();
+          
+          if (data && !error) {
+            setShopItems((prev) => prev.map(s => s.id === editingShopItem.id ? { ...data, ownedCount: data.owned_count } : s));
+            triggerToast("Reward updated successfully! ✏️");
+          }
         } else {
           // Creation Mode
-          const res = await fetch(`/api/shop`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                title: shopItemTitle,
-                description: shopItemDescription || "No custom reward description provided.",
-                cost: Number(shopItemCost),
-                category: shopItemCategory,
-                image: imgToUse,
-                icon: "redeem"
-            })
-          });
-          const data = await res.json();
-          setShopItems((prev) => [data, ...prev]);
-          triggerToast("Created new custom reward: " + data.title + "! 🎁");
+          const { data, error } = await supabase.from('shop_items').insert({
+            title: shopItemTitle,
+            description: shopItemDescription || "No custom reward description provided.",
+            cost: Number(shopItemCost),
+            category: shopItemCategory,
+            image: imgToUse,
+            icon: "redeem",
+            owned_count: 0
+          }).select().single();
+          
+          if (data && !error) {
+            setShopItems((prev) => [{ ...data, ownedCount: data.owned_count }, ...prev]);
+            triggerToast("Created new custom reward: " + data.title + "! 🎁");
+          }
         }
         setIsShopModalOpen(false);
     } catch (err) {
@@ -377,7 +425,7 @@ export default function App() {
   // Delete Shop Item
   const deleteShopItem = async (itemId) => {
     try {
-        await fetch(`/api/shop/${itemId}`, { method: 'DELETE' });
+        await supabase.from('shop_items').delete().eq('id', itemId);
         setShopItems((prev) => prev.filter(s => s.id !== itemId));
         triggerToast("Reward deleted from shop", "error");
     } catch (err) {
@@ -401,26 +449,24 @@ export default function App() {
     }
 
     try {
-        const res = await fetch(`/api/quests`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                title: newQuestTitle,
-                description: newQuestDescription || "No description provided.",
-                tier: newQuestTier,
-                xpReward,
-                coinReward,
-                status: 'active',
-                progress: 0
-            })
-        });
-        const data = await res.json();
-        setQuests((prev) => [data, ...prev]);
-        setIsQuestModalOpen(false);
-        setNewQuestTitle('');
-        setNewQuestDescription('');
-        setNewQuestTier('Bronze');
-        triggerToast("Created new quest: " + data.title + "! 📝");
+        const { data, error } = await supabase.from('quests').insert({
+            title: newQuestTitle,
+            description: newQuestDescription || "No description provided.",
+            tier: newQuestTier,
+            xp_reward: xpReward,
+            coin_reward: coinReward,
+            status: 'active',
+            progress: 0
+        }).select().single();
+        
+        if (data && !error) {
+          setQuests((prev) => [{ ...data, xpReward: data.xp_reward, coinReward: data.coin_reward }, ...prev]);
+          setIsQuestModalOpen(false);
+          setNewQuestTitle('');
+          setNewQuestDescription('');
+          setNewQuestTier('Bronze');
+          triggerToast("Created new quest: " + data.title + "! 📝");
+        }
     } catch (err) {
         console.error(err);
     }
@@ -441,13 +487,31 @@ export default function App() {
   // Daily Streak Bonus trigger
   const claimStreakBonus = async () => {
     try {
-        const res = await fetch(`/api/user/streak`, { method: 'POST' });
-        const data = await res.json();
-        setStreak(data.streak);
-        setCoins(data.coins);
-        setXp(data.xp);
-        setLevel(data.level);
-        triggerToast("Daily Streak Maintained! Bonus +150 Coins & +300 XP awarded! 🔥");
+        const { data: userStats } = await supabase.from('user_stats').select('*').single();
+        if (!userStats) return;
+
+        let newXp = userStats.xp + 300;
+        let newCoins = userStats.coins + 150;
+        let newLevel = userStats.level;
+        if (newXp >= 10000) {
+          newLevel += 1;
+          newXp -= 10000;
+        }
+
+        const { data, error } = await supabase.from('user_stats').update({ 
+          streak: userStats.streak + 1,
+          coins: newCoins,
+          xp: newXp,
+          level: newLevel
+        }).eq('id', userStats.id).select().single();
+
+        if (data && !error) {
+          setStreak(data.streak);
+          setCoins(data.coins);
+          setXp(data.xp);
+          setLevel(data.level);
+          triggerToast("Daily Streak Maintained! Bonus +150 Coins & +300 XP awarded! 🔥");
+        }
     } catch (err) {
         console.error(err);
     }
